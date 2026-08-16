@@ -1,22 +1,28 @@
 # 🛡️ Hybrid Fraud Detection Engine
 
-A practical, full-stack Transaction Anomaly Detection engine that combines the explainability of SQL Rule-Based detection with the probabilistic power of Machine Learning.
+A production-ready, full-stack Transaction Anomaly Detection engine that combines the explainability of **Deterministic SQL Rules** with the probabilistic power of **Machine Learning**.
+
+![Dashboard Preview](https://via.placeholder.com/1200x600.png?text=Fraud+Detection+Dashboard)
 
 ## 🚀 Features
 
-- **Live Transaction Simulator**: Continuously generates realistic financial transactions in the background and occasionally injects synthetic fraud (e.g. Card Testing, Value Anomalies).
-- **Advanced SQL Detection Layer**: Uses PostgreSQL Window Functions and CTEs to evaluate complex fraud vectors in real-time, including:
-  - 🏃‍♂️ **High-Velocity Card Testing**: Detects >5 transactions within a rolling 2-minute window.
-  - 💸 **Value Anomalies**: Calculates a rolling Z-Score based on the user's historical transaction average and standard deviation.
-  - ✈️ **Impossible Travel**: Uses the `earthdistance` extension to calculate the travel speed between consecutive transactions and flags unrealistic physical movement (>1000 km/h).
-- **Machine Learning (Isolation Forest)**: An unsupervised `scikit-learn` model trained on SQL-engineered features to detect subtle multidimensional anomalies.
-- **Premium React Dashboard**: A dark-mode, auto-refreshing investigation dashboard built with Vite, Tailwind CSS, and Recharts.
+- **Live Transaction Simulator**: Continuously generates realistic financial transactions in the background based on distinct customer behavioral profiles. Intentionally injects specific fraud vectors mixed with normal traffic.
+- **Advanced SQL Detection Layer**: Uses PostgreSQL Window Functions and CTEs to evaluate complex fraud rules in real-time:
+  - 🏃‍♂️ **High-Velocity Card Testing**: Detects rapid successive transactions.
+  - 💸 **Value Anomalies**: Calculates a rolling Z-Score based on the user's historical spend.
+  - ✈️ **Impossible Travel**: Calculates physical speed between consecutive transactions using the `earthdistance` extension to flag unrealistic movement.
+  - 💳 **Micro-Charge Testing**: Identifies patterns of small authorizations often preceding large fraud.
+  - 🌍 **Cross-Border Fraud**: Flags sudden shifts to foreign merchants.
+  - 🌙 **Late-Night Anomalies**: Flags suspicious transactions occurring in the dead of night.
+  - 🛒 **Rapid Category Hopping**: Detects sudden shifts in merchant category spending behavior.
+- **9-Dimensional Machine Learning**: An unsupervised `IsolationForest` AI model trained on the SQL-engineered features. Calculates dynamic contamination thresholds to detect subtle, multi-variable fraud vectors that bypass rigid rules.
+- **Premium React Dashboard**: A dark-mode, auto-refreshing investigation dashboard built with Vite, Tailwind CSS, and Recharts for live threat monitoring.
 
 ## 🏗️ Architecture
 
 ```mermaid
 graph TD
-    A[Live Transaction Simulator] --> B[(PostgreSQL 15)]
+    A[Data Generator Simulator] --> B[(PostgreSQL 15)]
     B --> C{SQL Rule Engine + Window Functions}
     C --> D[Deterministic Risk Score]
     C --> E[ML Isolation Forest]
@@ -26,24 +32,42 @@ graph TD
     G --> H[React Dashboard]
 ```
 
-## 🛠️ Quick Start
+## 🛠️ Quick Start (Docker)
 
-This project is fully containerized. You do not need to install Python or Node locally.
+This project is fully containerized. You do not need to install Python or Node locally to run it.
 
-1. **Clone the repository** (if applicable).
-2. **Start the stack** using Docker Compose:
-   ```bash
-   docker compose up --build -d
-   ```
-3. **Wait a few seconds** for the database to initialize and the ML model to load.
-4. **Open the Dashboard**:
-   Navigate to [http://localhost:5173/](http://localhost:5173/) in your browser.
+### 1. Clone the repository
+```bash
+git clone https://github.com/yourusername/fraud-detection-engine.git
+cd fraud-detection-engine
+```
 
-You will see the dashboard populate with data. As the simulator runs in the background, you will see new transactions automatically appearing in the timeline!
+### 2. Start the Stack
+Bring up the Database, FastAPI backend, and React frontend.
+```bash
+docker compose up --build -d
+```
 
-## 🧑‍💻 Development
+### 3. Seed the Database
+Since the database starts empty, run the realistic data generator inside the backend container to simulate thousands of customers, merchants, and transactions.
+```bash
+docker compose exec backend python ../data/generate_data.py
+```
 
-If you want to run the pieces locally without Docker:
+### 4. Train the AI Model
+Train the 9-dimensional Isolation Forest model on the dataset you just generated.
+```bash
+docker compose exec backend python ../ml/train_isolation_forest.py
+```
+
+### 5. Access the Dashboard
+Navigate to [http://localhost:5173/](http://localhost:5173/) in your browser. 
+
+The dashboard will populate with your freshly generated data! The live simulator will continue generating new transactions in the background every few seconds.
+
+## 🧑‍💻 Manual Development Setup
+
+If you prefer to run the components locally without Docker:
 
 **1. Database**
 ```bash
@@ -56,6 +80,8 @@ cd backend
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+python ../data/generate_data.py
+python ../ml/train_isolation_forest.py
 uvicorn main:app --reload
 ```
 

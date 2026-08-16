@@ -12,6 +12,9 @@ WITH base_metrics AS (
         t.amount,
         t.latitude,
         t.longitude,
+        t.country AS merchant_country,
+        c.country AS customer_country,
+        m.category AS merchant_category,
         
         -- Rule 1: High-Velocity Card Testing
         COUNT(*) OVER (
@@ -19,6 +22,13 @@ WITH base_metrics AS (
             ORDER BY t.timestamp 
             RANGE BETWEEN INTERVAL '2 minutes' PRECEDING AND CURRENT ROW
         ) AS velocity_count,
+
+        -- Micro-Charge Testing
+        SUM(CASE WHEN t.amount < 2.00 THEN 1 ELSE 0 END) OVER (
+            PARTITION BY t.card_id
+            ORDER BY t.timestamp
+            RANGE BETWEEN INTERVAL '24 hours' PRECEDING AND CURRENT ROW
+        ) AS micro_charge_count,
         
         -- Historical metrics for Rule 2
         AVG(t.amount) OVER (
@@ -33,15 +43,19 @@ WITH base_metrics AS (
             ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
         ) AS account_std_amount,
         
-        -- Previous transaction metrics for Rule 3
+        -- Previous transaction metrics for Rule 3 & Category Hopping
         LAG(t.latitude) OVER w_card AS prev_latitude,
         LAG(t.longitude) OVER w_card AS prev_longitude,
         LAG(t.timestamp) OVER w_card AS prev_timestamp,
+        LAG(m.category) OVER w_card AS prev_category,
         
         -- Previous device for Rule 4
         LAG(t.device_id) OVER w_account AS prev_device_id
         
     FROM transactions t
+    JOIN accounts a ON t.account_id = a.account_id
+    JOIN customers c ON a.customer_id = c.customer_id
+    JOIN merchants m ON t.merchant_id = m.merchant_id
     WINDOW 
         w_card AS (PARTITION BY t.card_id ORDER BY t.timestamp),
         w_account AS (PARTITION BY t.account_id ORDER BY t.timestamp)
@@ -73,7 +87,13 @@ calculated_features AS (
         CASE 
             WHEN prev_device_id IS NOT NULL AND device_id != prev_device_id THEN 1
             ELSE 0
-        END AS new_device_flag
+        END AS new_device_flag,
+
+        -- Category Change Flag
+        CASE
+            WHEN prev_category IS NOT NULL AND merchant_category != prev_category THEN 1
+            ELSE 0
+        END AS category_change_flag
         
     FROM base_metrics
 ),
@@ -93,15 +113,25 @@ SELECT
     -- Evaluate rules (Boolean flags)
     velocity_count >= 5 AS rule_high_velocity,
     z_score >= 3.0 AS rule_amount_anomaly,
-    travel_speed_kmh > 1000 AS rule_impossible_travel, -- 1000 km/h is roughly commercial airliner speed
+    travel_speed_kmh > 1000 AS rule_impossible_travel,
     new_device_flag = 1 AS rule_new_device,
     
-    -- Calculate Risk Score
+    -- New Rules
+    (merchant_country != customer_country) AS rule_foreign_transaction,
+    (EXTRACT(HOUR FROM timestamp) BETWEEN 1 AND 5) AS rule_late_night,
+    (micro_charge_count >= 3) AS rule_micro_testing,
+    (category_change_flag = 1 AND time_diff_hours < 1.0) AS rule_rapid_category_hopping,
+    
+    -- Calculate Risk Score with finely-tuned realistic weights
     (
-        CASE WHEN velocity_count >= 5 THEN 30 ELSE 0 END +
-        CASE WHEN z_score >= 3.0 THEN 30 ELSE 0 END +
-        CASE WHEN travel_speed_kmh > 1000 THEN 30 ELSE 0 END +
-        CASE WHEN new_device_flag = 1 THEN 10 ELSE 0 END
+        CASE WHEN velocity_count >= 5 THEN 60 ELSE 0 END +
+        CASE WHEN z_score >= 3.0 THEN 45 ELSE 0 END +
+        CASE WHEN travel_speed_kmh > 1000 THEN 80 ELSE 0 END +
+        CASE WHEN new_device_flag = 1 THEN 20 ELSE 0 END +
+        CASE WHEN merchant_country != customer_country THEN 20 ELSE 0 END +
+        CASE WHEN EXTRACT(HOUR FROM timestamp) BETWEEN 1 AND 5 THEN 15 ELSE 0 END +
+        CASE WHEN micro_charge_count >= 3 THEN 40 ELSE 0 END +
+        CASE WHEN category_change_flag = 1 AND time_diff_hours < 1.0 THEN 10 ELSE 0 END
     ) AS sql_risk_score
 
 FROM risk_scoring;

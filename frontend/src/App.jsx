@@ -28,12 +28,16 @@ const getRiskLevel = (score) => {
   return 'low';
 };
 
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
 export default function App() {
   const [summary, setSummary] = useState(null);
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedTx, setSelectedTx] = useState(null);
   const [detailsLoading, setDetailsLoading] = useState(false);
+
+  const [recentTransactions, setRecentTransactions] = useState([]);
 
   useEffect(() => {
     fetchData();
@@ -44,15 +48,18 @@ export default function App() {
 
   const fetchData = async () => {
     try {
-      const [summaryRes, txRes] = await Promise.all([
-        fetch('http://localhost:8000/analytics/summary'),
-        fetch('http://localhost:8000/transactions?limit=50&sort_by_risk=true')
+      const [summaryRes, txRes, recentRes] = await Promise.all([
+        fetch(`${API_BASE_URL}/analytics/summary`),
+        fetch(`${API_BASE_URL}/transactions?limit=50&sort_by_risk=true`),
+        fetch(`${API_BASE_URL}/transactions?limit=20&sort_by_risk=false`)
       ]);
       const summaryData = await summaryRes.json();
       const txData = await txRes.json();
+      const recentData = await recentRes.json();
       
       setSummary(summaryData);
       setTransactions(txData);
+      setRecentTransactions(recentData);
       setLoading(false);
     } catch (error) {
       console.error("Error fetching data:", error);
@@ -63,7 +70,7 @@ export default function App() {
   const handleTxClick = async (txId) => {
     setDetailsLoading(true);
     try {
-      const res = await fetch(`http://localhost:8000/transactions/${txId}/investigate`);
+      const res = await fetch(`${API_BASE_URL}/transactions/${txId}/investigate`);
       const data = await res.json();
       setSelectedTx(data);
     } catch (error) {
@@ -77,8 +84,8 @@ export default function App() {
     return <div className="loading">Initializing Fraud Detection Engine...</div>;
   }
 
-  // Generate chart data from recent transactions (mock distribution)
-  const chartData = transactions.slice(0, 20).reverse().map(tx => ({
+  // Generate chart data from actual recent transactions
+  const chartData = recentTransactions.reverse().map(tx => ({
     time: new Date(tx.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
     risk: tx.hybrid_risk_score || tx.sql_risk_score,
     amount: tx.amount
@@ -94,7 +101,7 @@ export default function App() {
       </header>
 
       {summary && (
-        <div className="summary-grid">
+        <div className="summary-grid" style={{gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))'}}>
           <div className="summary-card">
             <h3>Total Analyzed</h3>
             <div className="value">{summary.total_transactions.toLocaleString()}</div>
@@ -110,6 +117,22 @@ export default function App() {
           <div className="summary-card">
             <h3>Impossible Travel</h3>
             <div className="value warning">{summary.travel_flags.toLocaleString()}</div>
+          </div>
+          <div className="summary-card">
+            <h3>Foreign TX</h3>
+            <div className="value warning">{summary.foreign_flags?.toLocaleString() || 0}</div>
+          </div>
+          <div className="summary-card">
+            <h3>Late Night</h3>
+            <div className="value warning">{summary.late_night_flags?.toLocaleString() || 0}</div>
+          </div>
+          <div className="summary-card">
+            <h3>Micro Testing</h3>
+            <div className="value warning">{summary.micro_flags?.toLocaleString() || 0}</div>
+          </div>
+          <div className="summary-card">
+            <h3>Category Hopping</h3>
+            <div className="value warning">{summary.hopping_flags?.toLocaleString() || 0}</div>
           </div>
         </div>
       )}
@@ -136,6 +159,10 @@ export default function App() {
                       {tx.rule_amount_anomaly && <span className="badge danger">Value Anomaly</span>}
                       {tx.rule_impossible_travel && <span className="badge danger">Travel</span>}
                       {tx.rule_new_device && <span className="badge danger">New Device</span>}
+                      {tx.rule_foreign_transaction && <span className="badge warning">Foreign</span>}
+                      {tx.rule_late_night && <span className="badge warning">Late Night</span>}
+                      {tx.rule_micro_testing && <span className="badge danger">Micro Test</span>}
+                      {tx.rule_rapid_category_hopping && <span className="badge warning">Cat Hop</span>}
                     </div>
                   </div>
                   <div className="tx-score">
@@ -264,7 +291,7 @@ export default function App() {
                     </div>
                     <div className="rule-item">
                       {selectedTx.rule_amount_anomaly ? <XOctagon size={18} className="rule-icon active"/> : <ShieldCheck size={18} className="rule-icon inactive"/>}
-                      <span>Value Anomaly (Z-Score: {Number(selectedTx.z_score).toFixed(2)})</span>
+                      <span>Value Anomaly (Z-Score: {Number(selectedTx.z_score || 0).toFixed(2)})</span>
                     </div>
                     <div className="rule-item">
                       {selectedTx.rule_impossible_travel ? <XOctagon size={18} className="rule-icon active"/> : <ShieldCheck size={18} className="rule-icon inactive"/>}
@@ -273,6 +300,22 @@ export default function App() {
                     <div className="rule-item">
                       {selectedTx.rule_new_device ? <AlertTriangle size={18} className="rule-icon active" style={{color: 'var(--warning-color)'}}/> : <ShieldCheck size={18} className="rule-icon inactive"/>}
                       <span>Unrecognized Device</span>
+                    </div>
+                    <div className="rule-item">
+                      {selectedTx.rule_foreign_transaction ? <AlertTriangle size={18} className="rule-icon active" style={{color: 'var(--warning-color)'}}/> : <ShieldCheck size={18} className="rule-icon inactive"/>}
+                      <span>Foreign Transaction (Cross-border)</span>
+                    </div>
+                    <div className="rule-item">
+                      {selectedTx.rule_late_night ? <AlertTriangle size={18} className="rule-icon active" style={{color: 'var(--warning-color)'}}/> : <ShieldCheck size={18} className="rule-icon inactive"/>}
+                      <span>Late Night Transaction (1AM - 5AM)</span>
+                    </div>
+                    <div className="rule-item">
+                      {selectedTx.rule_micro_testing ? <XOctagon size={18} className="rule-icon active"/> : <ShieldCheck size={18} className="rule-icon inactive"/>}
+                      <span>Micro-Charge Testing (Small frequent charges)</span>
+                    </div>
+                    <div className="rule-item">
+                      {selectedTx.rule_rapid_category_hopping ? <AlertTriangle size={18} className="rule-icon active" style={{color: 'var(--warning-color)'}}/> : <ShieldCheck size={18} className="rule-icon inactive"/>}
+                      <span>Rapid Category Hopping</span>
                     </div>
                   </div>
                 </div>

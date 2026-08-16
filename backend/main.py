@@ -22,9 +22,9 @@ import uuid
 from datetime import datetime
 
 DB_CONFIG = {
-    "dbname": "fraud_db",
-    "user": "fraud_user",
-    "password": "fraud_password",
+    "dbname": os.environ.get("DB_NAME", "fraud_db"),
+    "user": os.environ.get("DB_USER", "fraud_user"),
+    "password": os.environ.get("DB_PASSWORD", "fraud_password"),
     "host": os.getenv("DB_HOST", "localhost"),
     "port": os.getenv("DB_PORT", "5433")
 }
@@ -118,7 +118,9 @@ def get_transactions(limit: int = 100, offset: int = 0, sort_by_risk: bool = Tru
         SELECT 
             transaction_id, account_id, merchant_id, timestamp, amount, 
             sql_risk_score, rule_high_velocity, rule_amount_anomaly, 
-            rule_impossible_travel, rule_new_device
+            rule_impossible_travel, rule_new_device,
+            rule_foreign_transaction, rule_late_night,
+            rule_micro_testing, rule_rapid_category_hopping
         FROM transaction_features
         {order_clause}
         LIMIT %s OFFSET %s
@@ -135,7 +137,10 @@ def get_transactions(limit: int = 100, offset: int = 0, sort_by_risk: bool = Tru
         tx_ids = [t['transaction_id'] for t in transactions]
         format_strings = ','.join(['%s'] * len(tx_ids))
         feature_query = f"""
-            SELECT transaction_id, amount, velocity_count, z_score, travel_speed_kmh, new_device_flag
+            SELECT transaction_id, amount, velocity_count, z_score, travel_speed_kmh, new_device_flag,
+                   micro_charge_count, category_change_flag, 
+                   CAST(rule_foreign_transaction AS INT) as rule_foreign_transaction, 
+                   CAST(rule_late_night AS INT) as rule_late_night
             FROM transaction_features
             WHERE transaction_id IN ({format_strings})
         """
@@ -144,7 +149,8 @@ def get_transactions(limit: int = 100, offset: int = 0, sort_by_risk: bool = Tru
         
         if features_list:
             feat_df = pd.DataFrame(features_list).fillna(0)
-            X = feat_df[['amount', 'velocity_count', 'z_score', 'travel_speed_kmh', 'new_device_flag']]
+            X = feat_df[['amount', 'velocity_count', 'z_score', 'travel_speed_kmh', 'new_device_flag', 
+                         'micro_charge_count', 'category_change_flag', 'rule_foreign_transaction', 'rule_late_night']]
             
             # Normal ML score is negative for anomalies. We map it to 0-100 risk score
             # A very negative score means high risk.
@@ -178,7 +184,11 @@ def get_analytics_summary():
             SUM(CASE WHEN rule_high_velocity THEN 1 ELSE 0 END) as velocity_flags,
             SUM(CASE WHEN rule_amount_anomaly THEN 1 ELSE 0 END) as amount_flags,
             SUM(CASE WHEN rule_impossible_travel THEN 1 ELSE 0 END) as travel_flags,
-            SUM(CASE WHEN rule_new_device THEN 1 ELSE 0 END) as device_flags
+            SUM(CASE WHEN rule_new_device THEN 1 ELSE 0 END) as device_flags,
+            SUM(CASE WHEN rule_foreign_transaction THEN 1 ELSE 0 END) as foreign_flags,
+            SUM(CASE WHEN rule_late_night THEN 1 ELSE 0 END) as late_night_flags,
+            SUM(CASE WHEN rule_micro_testing THEN 1 ELSE 0 END) as micro_flags,
+            SUM(CASE WHEN rule_rapid_category_hopping THEN 1 ELSE 0 END) as hopping_flags
         FROM transaction_features
     """)
     summary = cur.fetchone()
@@ -194,7 +204,10 @@ def investigate_transaction(transaction_id: str):
     
     # 1. Fetch Transaction Details
     cur.execute("""
-        SELECT * FROM transaction_features WHERE transaction_id = %s
+        SELECT *, 
+               CAST(rule_foreign_transaction AS INT) as rule_foreign_transaction_int,
+               CAST(rule_late_night AS INT) as rule_late_night_int
+        FROM transaction_features WHERE transaction_id = %s
     """, (transaction_id,))
     tx = cur.fetchone()
     
@@ -203,8 +216,14 @@ def investigate_transaction(transaction_id: str):
         
     # 2. Add ML Score
     if ml_model:
-        feat_df = pd.DataFrame([tx]).fillna(0)
-        X = feat_df[['amount', 'velocity_count', 'z_score', 'travel_speed_kmh', 'new_device_flag']]
+        # Map back to original feature names expected by the model
+        tx_for_ml = dict(tx)
+        tx_for_ml['rule_foreign_transaction'] = tx_for_ml['rule_foreign_transaction_int']
+        tx_for_ml['rule_late_night'] = tx_for_ml['rule_late_night_int']
+        
+        feat_df = pd.DataFrame([tx_for_ml]).fillna(0)
+        X = feat_df[['amount', 'velocity_count', 'z_score', 'travel_speed_kmh', 'new_device_flag',
+                     'micro_charge_count', 'category_change_flag', 'rule_foreign_transaction', 'rule_late_night']]
         raw_score = ml_model.decision_function(X)[0]
         tx['ml_risk_score'] = max(0, min(100, int(raw_score * -1000)))
         tx['hybrid_risk_score'] = int((tx['sql_risk_score'] * 0.6) + (tx['ml_risk_score'] * 0.4))

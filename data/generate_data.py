@@ -10,9 +10,9 @@ import numpy as np
 fake = Faker()
 
 DB_CONFIG = {
-    "dbname": "fraud_db",
-    "user": "fraud_user",
-    "password": "fraud_password",
+    "dbname": os.environ.get("DB_NAME", "fraud_db"),
+    "user": os.environ.get("DB_USER", "fraud_user"),
+    "password": os.environ.get("DB_PASSWORD", "fraud_password"),
     "host": os.getenv("DB_HOST", "localhost"),
     "port": os.getenv("DB_PORT", "5433")
 }
@@ -40,17 +40,65 @@ CATEGORIES = {
     "Online Retail": {"mu": 3.9, "sigma": 1.0}, # ~$50 to $200
 }
 
-def generate_customers(n=100):
+CURRENCIES = {
+    "USA": "USD",
+    "UK": "GBP",
+    "Japan": "JPY",
+    "Australia": "AUD",
+    "Canada": "CAD"
+}
+
+PROFILES = [
+    {
+        "name": "Budget",
+        "weight": 0.5, 
+        "amount_multiplier": 0.5,
+        "decline_chance": 0.1, 
+        "categories": ["Fast Food", "Coffee Shop", "Groceries"],
+        "travel_chance": 0.01
+    },
+    {
+        "name": "Average",
+        "weight": 0.35,
+        "amount_multiplier": 1.0,
+        "decline_chance": 0.03,
+        "categories": ["Fast Food", "Coffee Shop", "Groceries", "Gas Station", "Online Retail"],
+        "travel_chance": 0.05
+    },
+    {
+        "name": "Business",
+        "weight": 0.1,
+        "amount_multiplier": 2.5,
+        "decline_chance": 0.01,
+        "categories": ["Travel", "Gas Station", "Coffee Shop", "Electronics"],
+        "travel_chance": 0.3
+    },
+    {
+        "name": "High-Net-Worth",
+        "weight": 0.05,
+        "amount_multiplier": 5.0,
+        "decline_chance": 0.005,
+        "categories": ["Travel", "Electronics", "Online Retail", "Groceries"],
+        "travel_chance": 0.2
+    }
+]
+
+def generate_customers(n=500):
     customers = []
+    profile_names = [p["name"] for p in PROFILES]
+    profile_weights = [p["weight"] for p in PROFILES]
+    
     for _ in range(n):
         city = random.choice(CITIES)
+        profile = random.choices(profile_names, weights=profile_weights)[0]
         customers.append({
             "customer_id": str(uuid.uuid4()),
             "name": fake.name(),
             "country": city["country"],
             "home_lat": city["lat"] + random.uniform(-0.1, 0.1), # slight jitter around city center
             "home_lon": city["lon"] + random.uniform(-0.1, 0.1),
-            "created_at": datetime.now() - timedelta(days=random.randint(100, 1000))
+            "created_at": datetime.now() - timedelta(days=random.randint(100, 1000)),
+            "profile": profile
         })
     return customers
 
@@ -82,7 +130,7 @@ def generate_cards(accounts, n_per_account=(1, 2)):
             })
     return cards
 
-def generate_merchants(n=200):
+def generate_merchants(n=1000):
     merchants = []
     for _ in range(n):
         city = random.choice(CITIES)
@@ -110,24 +158,31 @@ def generate_devices(n=200):
         })
     return devices
 
-def generate_transactions(customers, accounts, cards, merchants, devices, start_date, num_days=30, tx_per_day=500):
+def generate_transactions(customers, accounts, cards, merchants, devices, start_date, num_days=30, tx_per_day=1500):
     transactions = []
     
     # Pre-map accounts to customers to find home location
     account_to_customer = {a["account_id"]: next(c for c in customers if c["customer_id"] == a["customer_id"]) for a in accounts}
     card_to_account = {c["card_id"]: c["account_id"] for c in cards}
     
+    # Assign 1-2 devices per account to avoid endless "New Device" flags
+    account_devices = {a["account_id"]: random.sample(devices, random.randint(1, 2)) for a in accounts}
+
     # Generate random timestamps weighted towards daytime (8am - 8pm)
     timestamps = []
-    current_time = start_date
     for _ in range(num_days * tx_per_day):
-        hour = int(np.random.normal(14, 4)) # Mean at 2pm, mostly between 6am and 10pm
-        hour = max(0, min(23, hour))
+        hour = int(np.random.normal(14, 4))
+        hour = max(6, min(23, hour)) # Force 6 AM to 11 PM to avoid accidental Late Night anomalies
         minute = random.randint(0, 59)
         second = random.randint(0, 59)
         day_offset = random.randint(0, num_days - 1)
         
         tx_time = start_date + timedelta(days=day_offset, hours=hour, minutes=minute, seconds=second)
+        
+        if tx_time.weekday() >= 5:
+            if random.random() < 0.2:
+                tx_time = tx_time.replace(hour=max(6, min(23, tx_time.hour + 4)))
+                
         timestamps.append(tx_time)
         
     timestamps.sort()
@@ -136,20 +191,31 @@ def generate_transactions(customers, accounts, cards, merchants, devices, start_
         card = random.choice(cards)
         account_id = card_to_account[card["card_id"]]
         customer = account_to_customer[account_id]
+        profile_data = next(p for p in PROFILES if p["name"] == customer["profile"])
         
-        # 95% of the time, shop in home country
-        if random.random() < 0.95:
-            local_merchants = [m for m in merchants if m["country"] == customer["country"]]
-            merchant = random.choice(local_merchants) if local_merchants else random.choice(merchants)
-        else:
-            merchant = random.choice(merchants)
+        # Base transactions are ALWAYS domestic to prevent accidental Impossible Travel or Foreign TX
+        local_merchants = [m for m in merchants if m["country"] == customer["country"]]
+        if not local_merchants:
+            local_merchants = merchants
             
-        device = random.choice(devices)
+        favored_merchants = [m for m in local_merchants if m["category"] in profile_data["categories"]]
         
-        # Realistic pricing based on log-normal distribution for the category
+        if favored_merchants and random.random() < 0.7:
+            merchant = random.choice(favored_merchants)
+        else:
+            merchant = random.choice(local_merchants)
+            
+        device = random.choice(account_devices[account_id])
+        
+        # Realistic pricing based on log-normal distribution for the category and profile modifier
         cat_params = CATEGORIES[merchant["category"]]
-        amount = round(np.random.lognormal(cat_params["mu"], cat_params["sigma"]), 2)
+        base_amount = np.random.lognormal(cat_params["mu"], cat_params["sigma"])
+        amount = round(base_amount * profile_data["amount_multiplier"], 2)
         amount = max(1.0, amount) # Ensure at least $1
+        
+        # Determine Status and Currency
+        status = "DECLINED" if random.random() < profile_data["decline_chance"] else "SUCCESS"
+        currency = CURRENCIES.get(merchant["country"], "USD")
         
         transactions.append({
             "transaction_id": str(uuid.uuid4()),
@@ -159,101 +225,179 @@ def generate_transactions(customers, accounts, cards, merchants, devices, start_
             "device_id": device["device_id"],
             "timestamp": tx_time,
             "amount": amount,
-            "currency": "USD",
+            "currency": currency,
             "latitude": merchant["latitude"],
             "longitude": merchant["longitude"],
             "country": merchant["country"],
             "ip_address": fake.ipv4(),
             "payment_method": "Card",
-            "status": "SUCCESS"
+            "status": status
         })
         
     return transactions
 
-def inject_anomalies(transactions, cards, merchants, devices):
+def inject_anomalies(transactions, customers, accounts, cards, merchants, devices):
+    # We will inject 50 of each type of anomaly to ensure a perfect mix
+    
     # 1. High Velocity Attack (Card Testing)
-    target_card = random.choice(cards)
-    base_time = datetime.now() - timedelta(days=random.randint(1, 10))
-    for i in range(15): # 15 tx in 75 seconds
+    for _ in range(50):
+        target_card = random.choice(cards)
+        base_time = datetime.now() - timedelta(days=random.randint(1, 10))
+        for i in range(15): # 15 tx in 75 seconds
+            transactions.append({
+                "transaction_id": str(uuid.uuid4()),
+                "account_id": target_card["account_id"],
+                "card_id": target_card["card_id"],
+                "merchant_id": random.choice(merchants)["merchant_id"],
+                "device_id": random.choice(devices)["device_id"],
+                "timestamp": base_time + timedelta(seconds=i*5),
+                "amount": round(random.uniform(1.0, 3.0), 2),
+                "currency": "USD",
+                "latitude": 0.0,
+                "longitude": 0.0,
+                "country": "Unknown",
+                "ip_address": fake.ipv4(),
+                "payment_method": "Card",
+                "status": "SUCCESS"
+            })
+
+    # 2. Value Anomaly
+    for _ in range(50):
+        target_card2 = random.choice(cards)
+        merchant2 = random.choice(merchants)
         transactions.append({
             "transaction_id": str(uuid.uuid4()),
-            "account_id": target_card["account_id"],
-            "card_id": target_card["card_id"],
-            "merchant_id": random.choice(merchants)["merchant_id"],
+            "account_id": target_card2["account_id"],
+            "card_id": target_card2["card_id"],
+            "merchant_id": merchant2["merchant_id"],
             "device_id": random.choice(devices)["device_id"],
-            "timestamp": base_time + timedelta(seconds=i*5),
-            "amount": round(random.uniform(1.0, 3.0), 2), # Small testing amounts
+            "timestamp": datetime.now() - timedelta(days=random.randint(1, 5)),
+            "amount": 125000.00, # Extremely high amount
             "currency": "USD",
-            "latitude": 0.0,
-            "longitude": 0.0,
-            "country": "Unknown",
+            "latitude": merchant2["latitude"],
+            "longitude": merchant2["longitude"],
+            "country": merchant2["country"],
             "ip_address": fake.ipv4(),
             "payment_method": "Card",
             "status": "SUCCESS"
         })
 
-    # 2. Value Anomaly
-    target_card2 = random.choice(cards)
-    merchant2 = random.choice(merchants)
-    transactions.append({
-        "transaction_id": str(uuid.uuid4()),
-        "account_id": target_card2["account_id"],
-        "card_id": target_card2["card_id"],
-        "merchant_id": merchant2["merchant_id"],
-        "device_id": random.choice(devices)["device_id"],
-        "timestamp": datetime.now() - timedelta(days=random.randint(1, 5)),
-        "amount": 125000.00, # Extremely high amount (Rolex/Car)
-        "currency": "USD",
-        "latitude": merchant2["latitude"],
-        "longitude": merchant2["longitude"],
-        "country": merchant2["country"],
-        "ip_address": fake.ipv4(),
-        "payment_method": "Card",
-        "status": "SUCCESS"
-    })
-
     # 3. Impossible Travel
-    target_card3 = random.choice(cards)
-    device3 = random.choice(devices)
-    time3 = datetime.now() - timedelta(days=random.randint(1, 5))
-    
-    # Tx 1: New York
-    ny_merchant = next((m for m in merchants if m["country"] == "USA"), merchants[0])
-    transactions.append({
-        "transaction_id": str(uuid.uuid4()),
-        "account_id": target_card3["account_id"],
-        "card_id": target_card3["card_id"],
-        "merchant_id": ny_merchant["merchant_id"],
-        "device_id": device3["device_id"],
-        "timestamp": time3,
-        "amount": 50.0,
-        "currency": "USD",
-        "latitude": 40.7128,
-        "longitude": -74.0060,
-        "country": "USA",
-        "ip_address": fake.ipv4(),
-        "payment_method": "Card",
-        "status": "SUCCESS"
-    })
-    
-    # Tx 2: Tokyo 10 mins later
-    tokyo_merchant = next((m for m in merchants if m["country"] == "Japan"), merchants[1])
-    transactions.append({
-        "transaction_id": str(uuid.uuid4()),
-        "account_id": target_card3["account_id"],
-        "card_id": target_card3["card_id"],
-        "merchant_id": tokyo_merchant["merchant_id"],
-        "device_id": device3["device_id"],
-        "timestamp": time3 + timedelta(minutes=10),
-        "amount": 120.0,
-        "currency": "JPY",
-        "latitude": 35.6762,
-        "longitude": 139.6503,
-        "country": "Japan",
-        "ip_address": fake.ipv4(),
-        "payment_method": "Card",
-        "status": "SUCCESS"
-    })
+    for _ in range(50):
+        target_card3 = random.choice(cards)
+        device3 = random.choice(devices)
+        time3 = datetime.now() - timedelta(days=random.randint(1, 5))
+        
+        # Tx 1: New York
+        ny_merchant = next((m for m in merchants if m["country"] == "USA"), merchants[0])
+        transactions.append({
+            "transaction_id": str(uuid.uuid4()),
+            "account_id": target_card3["account_id"],
+            "card_id": target_card3["card_id"],
+            "merchant_id": ny_merchant["merchant_id"],
+            "device_id": device3["device_id"],
+            "timestamp": time3,
+            "amount": 50.0,
+            "currency": "USD",
+            "latitude": 40.7128,
+            "longitude": -74.0060,
+            "country": "USA",
+            "ip_address": fake.ipv4(),
+            "payment_method": "Card",
+            "status": "SUCCESS"
+        })
+        
+        # Tx 2: Tokyo 10 mins later
+        tokyo_merchant = next((m for m in merchants if m["country"] == "Japan"), merchants[1])
+        transactions.append({
+            "transaction_id": str(uuid.uuid4()),
+            "account_id": target_card3["account_id"],
+            "card_id": target_card3["card_id"],
+            "merchant_id": tokyo_merchant["merchant_id"],
+            "device_id": device3["device_id"],
+            "timestamp": time3 + timedelta(minutes=10),
+            "amount": 120.0,
+            "currency": "JPY",
+            "latitude": 35.6762,
+            "longitude": 139.6503,
+            "country": "Japan",
+            "ip_address": fake.ipv4(),
+            "payment_method": "Card",
+            "status": "SUCCESS"
+        })
+
+    # 4. Micro-Charge Testing
+    for _ in range(50):
+        target_card4 = random.choice(cards)
+        base_time4 = datetime.now() - timedelta(days=random.randint(1, 10))
+        for i in range(4): # 4 micro-charges in 2 hours
+            transactions.append({
+                "transaction_id": str(uuid.uuid4()),
+                "account_id": target_card4["account_id"],
+                "card_id": target_card4["card_id"],
+                "merchant_id": random.choice(merchants)["merchant_id"],
+                "device_id": random.choice(devices)["device_id"],
+                "timestamp": base_time4 + timedelta(minutes=i*30),
+                "amount": round(random.uniform(0.5, 1.5), 2),
+                "currency": "USD",
+                "latitude": 0.0,
+                "longitude": 0.0,
+                "country": "Unknown",
+                "ip_address": fake.ipv4(),
+                "payment_method": "Card",
+                "status": "SUCCESS"
+            })
+
+    # 5. Late Night Transaction
+    for _ in range(50):
+        target_card5 = random.choice(cards)
+        merchant5 = random.choice(merchants)
+        base_time5 = datetime.now() - timedelta(days=random.randint(1, 10))
+        base_time5 = base_time5.replace(hour=random.randint(2, 4), minute=random.randint(0, 59)) # 2 AM to 4 AM
+        transactions.append({
+            "transaction_id": str(uuid.uuid4()),
+            "account_id": target_card5["account_id"],
+            "card_id": target_card5["card_id"],
+            "merchant_id": merchant5["merchant_id"],
+            "device_id": random.choice(devices)["device_id"],
+            "timestamp": base_time5,
+            "amount": round(random.uniform(50.0, 300.0), 2),
+            "currency": CURRENCIES.get(merchant5["country"], "USD"),
+            "latitude": merchant5["latitude"],
+            "longitude": merchant5["longitude"],
+            "country": merchant5["country"],
+            "ip_address": fake.ipv4(),
+            "payment_method": "Card",
+            "status": "SUCCESS"
+        })
+
+    # 6. Cross-Border Transaction
+    for _ in range(50):
+        target_card6 = random.choice(cards)
+        account_id = target_card6["account_id"]
+        customer_id = next(a["customer_id"] for a in accounts if a["account_id"] == account_id)
+        customer_country = next(c["country"] for c in customers if c["customer_id"] == customer_id)
+        
+        foreign_merchants = [m for m in merchants if m["country"] != customer_country]
+        if foreign_merchants:
+            merchant6 = random.choice(foreign_merchants)
+            transactions.append({
+                "transaction_id": str(uuid.uuid4()),
+                "account_id": target_card6["account_id"],
+                "card_id": target_card6["card_id"],
+                "merchant_id": merchant6["merchant_id"],
+                "device_id": random.choice(devices)["device_id"],
+                "timestamp": datetime.now() - timedelta(days=random.randint(1, 10)),
+                "amount": round(random.uniform(100.0, 500.0), 2),
+                "currency": CURRENCIES.get(merchant6["country"], "USD"),
+                "latitude": merchant6["latitude"],
+                "longitude": merchant6["longitude"],
+                "country": merchant6["country"],
+                "ip_address": fake.ipv4(),
+                "payment_method": "Card",
+                "status": "SUCCESS"
+            })
+
     return transactions
 
 def main():
@@ -262,15 +406,15 @@ def main():
     cur = conn.cursor()
 
     print("Generating highly realistic data...")
-    customers = generate_customers(100)
+    customers = generate_customers(500)
     accounts = generate_accounts(customers)
     cards = generate_cards(accounts)
-    merchants = generate_merchants(200)
-    devices = generate_devices(150)
+    merchants = generate_merchants(1000)
+    devices = generate_devices(300)
     
     start_date = datetime.now() - timedelta(days=30)
     transactions = generate_transactions(customers, accounts, cards, merchants, devices, start_date)
-    transactions = inject_anomalies(transactions, cards, merchants, devices)
+    transactions = inject_anomalies(transactions, customers, accounts, cards, merchants, devices)
 
     print("Clearing old data...")
     cur.execute("TRUNCATE TABLE transactions, devices, merchants, cards, accounts, customers CASCADE;")
