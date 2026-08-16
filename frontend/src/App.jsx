@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ShieldAlert, ShieldCheck, Activity, AlertTriangle, AlertCircle, X, ChevronRight, XOctagon } from 'lucide-react';
+import { ShieldAlert, ShieldCheck, Activity, AlertTriangle, AlertCircle, X, XOctagon } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 // Format currency
@@ -35,7 +35,7 @@ export default function App() {
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedTx, setSelectedTx] = useState(null);
-  const [detailsLoading, setDetailsLoading] = useState(false);
+
 
   const [recentTransactions, setRecentTransactions] = useState([]);
 
@@ -68,15 +68,12 @@ export default function App() {
   };
 
   const handleTxClick = async (txId) => {
-    setDetailsLoading(true);
     try {
       const res = await fetch(`${API_BASE_URL}/transactions/${txId}/investigate`);
       const data = await res.json();
       setSelectedTx(data);
     } catch (error) {
       console.error("Error fetching tx details:", error);
-    } finally {
-      setDetailsLoading(false);
     }
   };
 
