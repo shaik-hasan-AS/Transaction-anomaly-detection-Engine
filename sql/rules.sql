@@ -49,7 +49,8 @@ WITH base_metrics AS (
         LAG(t.timestamp) OVER w_card AS prev_timestamp,
         LAG(m.category) OVER w_card AS prev_category,
         
-        -- Previous device for Rule 4
+        -- Keep the previous device for investigation context. The actual
+        -- new-device rule below checks the account's complete history.
         LAG(t.device_id) OVER w_account AS prev_device_id
         
     FROM transactions t
@@ -83,9 +84,17 @@ calculated_features AS (
             ELSE NULL
         END AS time_diff_hours,
         
-        -- New device flag
+        -- A device is new only when this account has never used it before.
+        -- Comparing only with the previous transaction incorrectly flags
+        -- normal A -> B -> A device usage as suspicious.
         CASE 
-            WHEN prev_device_id IS NOT NULL AND device_id != prev_device_id THEN 1
+            WHEN NOT EXISTS (
+                SELECT 1
+                FROM transactions previous_transaction
+                WHERE previous_transaction.account_id = bm.account_id
+                  AND previous_transaction.device_id = bm.device_id
+                  AND previous_transaction.timestamp < bm.timestamp
+            ) THEN 1
             ELSE 0
         END AS new_device_flag,
 
@@ -95,7 +104,7 @@ calculated_features AS (
             ELSE 0
         END AS category_change_flag
         
-    FROM base_metrics
+    FROM base_metrics bm
 ),
 risk_scoring AS (
     SELECT
@@ -117,13 +126,14 @@ SELECT
     new_device_flag = 1 AS rule_new_device,
     
     -- New Rules
-    (merchant_country != customer_country) AS rule_foreign_transaction,
+    (merchant_country IS NOT NULL AND customer_country IS NOT NULL
+        AND merchant_country != customer_country) AS rule_foreign_transaction,
     (EXTRACT(HOUR FROM timestamp) BETWEEN 1 AND 5) AS rule_late_night,
     (micro_charge_count >= 3) AS rule_micro_testing,
     (category_change_flag = 1 AND time_diff_hours < 1.0) AS rule_rapid_category_hopping,
     
     -- Calculate Risk Score with finely-tuned realistic weights
-    (
+    LEAST(100, (
         CASE WHEN velocity_count >= 5 THEN 60 ELSE 0 END +
         CASE WHEN z_score >= 3.0 THEN 45 ELSE 0 END +
         CASE WHEN travel_speed_kmh > 1000 THEN 80 ELSE 0 END +
@@ -132,6 +142,6 @@ SELECT
         CASE WHEN EXTRACT(HOUR FROM timestamp) BETWEEN 1 AND 5 THEN 15 ELSE 0 END +
         CASE WHEN micro_charge_count >= 3 THEN 40 ELSE 0 END +
         CASE WHEN category_change_flag = 1 AND time_diff_hours < 1.0 THEN 10 ELSE 0 END
-    ) AS sql_risk_score
+    )) AS sql_risk_score
 
-FROM risk_scoring;
+FROM risk_scoring rs;
